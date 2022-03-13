@@ -19,6 +19,7 @@ package remote
 import (
 	"context"
 	"errors"
+	"flag"
 	"fmt"
 	"io/ioutil"
 	"net/http"
@@ -43,6 +44,14 @@ const (
 
 	// timestampFormat is the timestamp format used in the e2e directory name.
 	timestampFormat = "20060102T150405"
+)
+
+var (
+	machineType        = flag.String("machine-type", "n1-standard-1", "Machine type to run tests on")
+	imageProject       = flag.String("image-project", "debian-cloud", "Image project for VM")
+	imageName          = flag.String("image-name", "debian-11", "Image family for VM")
+	useConfidentialVms = flag.Bool("use-confidential-vms", false, "Use Confidential GCE VM")
+	vmCreationTags     = flag.String("vm-creation-tags", "", "Comma seperated list of tags to include when creating a VM")
 )
 
 type InstanceInfo struct {
@@ -91,10 +100,10 @@ func (i *InstanceInfo) CreateOrGetInstance(serviceAccount string) error {
 		return fmt.Errorf("Failed to create firewall rule: %v", err)
 	}
 
-	imageURL := "projects/debian-cloud/global/images/family/debian-11"
+	imageURL := fmt.Sprintf("projects/%s/global/images/%s", *imageProject, *imageName)
 	inst := &compute.Instance{
 		Name:        i.name,
-		MachineType: machineType(i.zone, ""),
+		MachineType: getMachineTypeUrl(i.zone),
 		NetworkInterfaces: []*compute.NetworkInterface{
 			{
 				AccessConfigs: []*compute.AccessConfig{
@@ -115,6 +124,21 @@ func (i *InstanceInfo) CreateOrGetInstance(serviceAccount string) error {
 				},
 			},
 		},
+	}
+
+	if *useConfidentialVms {
+		inst.ConfidentialInstanceConfig = &compute.ConfidentialInstanceConfig{
+			EnableConfidentialCompute: true,
+		}
+		inst.Scheduling = &compute.Scheduling{
+			OnHostMaintenance: "TERMINATE",
+		}
+	}
+
+	if *vmCreationTags != "" {
+		inst.Tags = &compute.Tags{
+			Items: strings.Split(*vmCreationTags, ","),
+		}
 	}
 
 	saObj := &compute.ServiceAccount{
@@ -215,11 +239,8 @@ func getTimestamp() string {
 	return fmt.Sprintf(time.Now().Format(timestampFormat))
 }
 
-func machineType(zone, machine string) string {
-	if machine == "" {
-		machine = defaultMachine
-	}
-	return fmt.Sprintf("zones/%s/machineTypes/%s", zone, machine)
+func getMachineTypeUrl(zone string) string {
+	return fmt.Sprintf("zones/%s/machineTypes/%s", zone, *machineType)
 }
 
 // Create default SSH filewall rule if it does not exist

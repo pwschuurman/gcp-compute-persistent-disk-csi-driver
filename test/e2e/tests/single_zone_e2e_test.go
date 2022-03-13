@@ -42,7 +42,7 @@ import (
 const (
 	testNamePrefix = "gcepd-csi-e2e-"
 
-	defaultSizeGb      int64 = 5
+	defaultSizeGb      int64 = 10
 	defaultRepdSizeGb  int64 = 200
 	defaultMwSizeGb    int64 = 200
 	readyState               = "READY"

@@ -33,10 +33,12 @@ import (
 )
 
 var (
-	project         = flag.String("project", "", "Project to run tests in")
-	serviceAccount  = flag.String("service-account", "", "Service account to bring up instance with")
+	project         = flag.String("project", "psch-gke-dev", "Project to run tests in")
+	serviceAccount  = flag.String("service-account", "psch-gke-dev-pd-sa@.iam.gserviceaccount.com", "Service account to bring up instance with")
 	runInProw       = flag.Bool("run-in-prow", false, "If true, use a Boskos loaned project and special CI service accounts and ssh keys")
 	deleteInstances = flag.Bool("delete-instances", false, "Delete the instances after tests run")
+	driverZone      = flag.String("driver-zone", "us-central1-c", "Zone for where the VM of the test runner should be created in")
+	sutZone         = flag.String("sut-zone", "us-central1-b", "Zone for where the VM of the system under test should be created in. If the same as driverZone, the system under test and the test driver will run on the same VM")
 
 	testContexts        = []*remote.TestContext{}
 	computeService      *compute.Service
@@ -60,7 +62,10 @@ var _ = BeforeSuite(func() {
 	tcc := make(chan *remote.TestContext)
 	defer close(tcc)
 
-	zones := []string{"us-central1-c", "us-central1-b"}
+	zones := []string{*driverZone}
+	if *sutZone != *driverZone {
+		zones = append(zones, *sutZone)
+	}
 
 	rand.Seed(time.Now().UnixNano())
 

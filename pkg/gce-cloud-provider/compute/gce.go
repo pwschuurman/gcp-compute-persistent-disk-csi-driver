@@ -44,9 +44,10 @@ const (
 
 	regionURITemplate = "projects/%s/regions/%s"
 
-	GCEComputeAPIEndpoint      = "https://www.googleapis.com/compute/v1/"
-	GCEComputeBetaAPIEndpoint  = "https://www.googleapis.com/compute/beta/"
-	GCEComputeAlphaAPIEndpoint = "https://www.googleapis.com/compute/alpha/"
+	GCEComputeAPIEndpoint        = "https://www.googleapis.com/compute/v1/"
+	GCEStagingComputeAPIEndpoint = "https://www.googleapis.com/compute/staging_v1/"
+	GCEComputeBetaAPIEndpoint    = "https://www.googleapis.com/compute/beta/"
+	GCEComputeAlphaAPIEndpoint   = "https://www.googleapis.com/compute/alpha/"
 
 	replicaZoneURITemplateSingleZone = "%s/zones/%s" // {gce.projectID}/zones/{disk.Zone}
 )

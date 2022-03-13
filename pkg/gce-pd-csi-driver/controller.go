@@ -1504,6 +1504,7 @@ func generateCreateVolumeResponse(disk *gce.CloudDisk, zones []string) *csi.Crea
 
 func cleanSelfLink(selfLink string) string {
 	temp := strings.TrimPrefix(selfLink, gce.GCEComputeAPIEndpoint)
+	temp = strings.TrimPrefix(selfLink, gce.GCEStagingComputeAPIEndpoint)
 	temp = strings.TrimPrefix(temp, gce.GCEComputeBetaAPIEndpoint)
 	return strings.TrimPrefix(temp, gce.GCEComputeAlphaAPIEndpoint)
 }
