@@ -106,10 +106,6 @@ type testParameters struct {
 	parallel             int
 }
 
-func init() {
-	flag.Set("logtostderr", "true")
-}
-
 func main() {
 	klog.InitFlags(nil)
 	flag.Set("logtostderr", "true")
