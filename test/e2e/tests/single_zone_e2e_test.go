@@ -1323,9 +1323,13 @@ func equalWithinEpsilon(a, b, epsiolon int64) bool {
 }
 
 func createAndValidateUniqueZonalDisk(client *remote.CsiClient, project, zone string, diskType string) (string, string) {
+	volName := testNamePrefix + string(uuid.NewUUID())
+	return createAndValidateZonalDisk(client, project, zone, diskType, volName)
+}
+
+func createAndValidateZonalDisk(client *remote.CsiClient, project, zone string, diskType string, volName string) (string, string) {
 	// Create Disk
 	disk := typeToDisk[diskType]
-	volName := testNamePrefix + string(uuid.NewUUID())
 
 	diskSize := defaultSizeGb
 	switch diskType {

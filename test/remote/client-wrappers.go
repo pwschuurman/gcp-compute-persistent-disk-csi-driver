@@ -134,7 +134,15 @@ func (c *CsiClient) DeleteVolume(volId string) error {
 	return err
 }
 
+func (c *CsiClient) ControllerPublishVolumeReadOnly(volId, nodeId string) error {
+	return c.controllerPublishVolume(volId, nodeId, false /* forceAttach */, true /* readOnly */)
+}
+
 func (c *CsiClient) ControllerPublishVolume(volId, nodeId string, forceAttach bool) error {
+	return c.controllerPublishVolume(volId, nodeId, forceAttach, false /* readOnly */)
+}
+
+func (c *CsiClient) controllerPublishVolume(volId, nodeId string, forceAttach bool, readOnly bool) error {
 	cpreq := &csipb.ControllerPublishVolumeRequest{
 		VolumeId:         volId,
 		NodeId:           nodeId,

@@ -91,6 +91,7 @@ type GCECompute interface {
 	GetDefaultZone() string
 	// Disk Methods
 	GetDisk(ctx context.Context, project string, volumeKey *meta.Key, gceAPIVersion GCEAPIVersion) (*CloudDisk, error)
+	RepairUnderspecifiedVolumeKeyForZone(ctx context.Context, project string, volumeKey *meta.Key, instanceZone string) (string, *meta.Key, error)
 	RepairUnderspecifiedVolumeKey(ctx context.Context, project string, volumeKey *meta.Key) (string, *meta.Key, error)
 	ValidateExistingDisk(ctx context.Context, disk *CloudDisk, params common.DiskParameters, reqBytes, limBytes int64, multiWriter bool) error
 	InsertDisk(ctx context.Context, project string, volKey *meta.Key, params common.DiskParameters, capBytes int64, capacityRange *csi.CapacityRange, replicaZones []string, snapshotID string, volumeContentSourceVolumeID string, multiWriter bool) error
@@ -169,6 +170,17 @@ func (cloud *CloudProvider) ListDisks(ctx context.Context) ([]*computev1.Disk, s
 		}
 	}
 	return items, "", nil
+}
+
+// RepairUnderspecifiedVolumeKey will query the cloud provider and check each zone for the disk specified
+// by the volume key and return a volume key with a correct zone
+func (cloud *CloudProvider) RepairUnderspecifiedVolumeKeyForZone(ctx context.Context, project string, volumeKey *meta.Key, instanceZone string) (string, *meta.Key, error) {
+	if volumeKey.Type() == meta.Zonal && volumeKey.Zone == common.MultiZoneValue {
+		// Multi-zone support
+		// Use the node's zone.
+		volumeKey.Zone = instanceZone
+	}
+	return cloud.RepairUnderspecifiedVolumeKey(ctx, project, volumeKey)
 }
 
 // RepairUnderspecifiedVolumeKey will query the cloud provider and check each zone for the disk specified

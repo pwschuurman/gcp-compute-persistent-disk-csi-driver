@@ -156,7 +156,7 @@ func NewControllerServer(gceDriver *GCEDriver, cloudProvider gce.GCECompute, err
 	return &GCEControllerServer{
 		Driver:                 gceDriver,
 		CloudProvider:          cloudProvider,
-		seen:                   map[string]int{},
+		volumeEntriesSeen:      map[string]int{},
 		volumeLocks:            common.NewVolumeLocks(),
 		errorBackoff:           newCsiErrorBackoff(errorBackoffInitialDuration, errorBackoffMaxDuration),
 		fallbackRequisiteZones: fallbackRequisiteZones,

@@ -22,6 +22,7 @@ import (
 	csi "github.com/container-storage-interface/spec/lib/go/csi"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	compute "google.golang.org/api/compute/v1"
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/apimachinery/pkg/util/uuid"
 	"k8s.io/klog/v2"
@@ -65,7 +66,7 @@ var _ = Describe("GCE PD CSI Driver Multi-Zone", func() {
 
 	})
 
-	It("Should successfully run through entire lifecycle of an RePD volume on instances in 2 zones", func() {
+	It("Should attach ROX 'multi-zone' PV instances to two separate VMs", func() {
 		// Create new driver and client
 
 		Expect(testContexts).NotTo(BeEmpty())
@@ -93,61 +94,66 @@ var _ = Describe("GCE PD CSI Driver Multi-Zone", func() {
 
 		p, _, _ := controllerInstance.GetIdentity()
 
-		region, err := common.GetRegionFromZones(zones)
-		Expect(err).To(BeNil(), "Failed to get region from zones")
-
 		// Create Disk
 		volName := testNamePrefix + string(uuid.NewUUID())
-		volume, err := controllerClient.CreateVolume(volName, map[string]string{
-			common.ParameterKeyReplicationType: "regional-pd",
-		}, defaultRepdSizeGb, &csi.TopologyRequirement{
-			Requisite: []*csi.Topology{
-				{
-					Segments: map[string]string{common.TopologyKeyZone: zones[0]},
-				},
-				{
-					Segments: map[string]string{common.TopologyKeyZone: zones[1]},
-				},
-			},
-		}, nil)
-		Expect(err).To(BeNil(), "CreateVolume failed with error: %v", err)
+		_, volID1 := createAndValidateZonalDisk(controllerClient, p, zones[0], standardDiskType, volName)
+		_, volID2 := createAndValidateZonalDisk(controllerClient, p, zones[1], standardDiskType, volName)
 
-		// Validate Disk Created
-		cloudDisk, err := computeService.RegionDisks.Get(p, region, volName).Do()
-		Expect(err).To(BeNil(), "Could not get disk from cloud directly")
-		Expect(cloudDisk.Type).To(ContainSubstring(standardDiskType))
-		Expect(cloudDisk.Status).To(Equal(readyState))
-		Expect(cloudDisk.SizeGb).To(Equal(defaultRepdSizeGb))
-		Expect(cloudDisk.Name).To(Equal(volName))
-		Expect(len(cloudDisk.ReplicaZones)).To(Equal(2))
-		zonesSet := sets.NewString(zones...)
-		for _, replicaZone := range cloudDisk.ReplicaZones {
-			tokens := strings.Split(replicaZone, "/")
-			actualZone := tokens[len(tokens)-1]
-			Expect(zonesSet.Has(actualZone)).To(BeTrue(), "Expected zone %v to exist in zone set %v", actualZone, zones)
+		labelsMap := map[string]string{
+			common.MultiZoneLabel: "true",
 		}
+		disk1, err := computeService.Disks.Get(p, zones[0], volName).Do()
+		Expect(err).To(BeNil(), "Could not get disk")
+		disk1Op, err := computeService.Disks.SetLabels(p, zones[0], volName, &compute.ZoneSetLabelsRequest{
+			LabelFingerprint: disk1.LabelFingerprint,
+			Labels:           labelsMap,
+		}).Do()
+		Expect(err).To(BeNil(), "Could not set disk labels")
+		_, err = computeService.ZoneOperations.Wait(p, zones[0], disk1Op.Name).Do()
+		Expect(err).To(BeNil(), "Could not set disk labels")
 
-		defer func() {
-			// Delete Disk
-			controllerClient.DeleteVolume(volume.VolumeId)
-			Expect(err).To(BeNil(), "DeleteVolume failed")
+		disk2, err := computeService.Disks.Get(p, zones[1], volName).Do()
+		Expect(err).To(BeNil(), "Could not get disk")
+		disk2Op, err := computeService.Disks.SetLabels(p, zones[1], volName, &compute.ZoneSetLabelsRequest{
+			LabelFingerprint: disk2.LabelFingerprint,
+			Labels:           labelsMap,
+		}).Do()
+		Expect(err).To(BeNil(), "Could not set disk labels")
+		_, err = computeService.ZoneOperations.Wait(p, zones[1], disk2Op.Name).Do()
+		Expect(err).To(BeNil(), "Could not set disk labels")
 
-			// Validate Disk Deleted
-			_, err = computeService.RegionDisks.Get(p, region, volName).Do()
-			Expect(gce.IsGCEError(err, "notFound")).To(BeTrue(), "Expected disk to not be found")
-		}()
+		defer deleteDisk(controllerClient, p, zones[0], volID1, volName)
+		defer deleteDisk(controllerClient, p, zones[1], volID2, volName)
 
-		// For each of the two instances
-		i := 0
-		for _, testContext := range zoneToContext {
-			readOnly := false
-			if i >= 1 {
-				readOnly = true
-			}
-			err = testAttachWriteReadDetach(volume.VolumeId, volName, testContext.Instance, testContext.Client, readOnly)
-			Expect(err).To(BeNil(), "failed volume lifecycle checks")
-			i = i + 1
-		}
+		// Attach Disk
+		volID := fmt.Sprintf("projects/%s/zones/multi-zone/disks/%s", p, volName)
+
+		// Attach disk to instance in the first zone.
+		tc0 := zoneToContext[zones[0]]
+		tc1 := zoneToContext[zones[1]]
+
+		nodeID0 := tc0.Instance.GetNodeID()
+		nodeID1 := tc1.Instance.GetNodeID()
+		klog.Errorf("Looking for node name: %v", nodeID0)
+		klog.Errorf("Looking for node name: %v", nodeID1)
+
+		err = controllerClient.ControllerPublishVolumeReadOnly(volID, nodeID0)
+		defer detachDisk(controllerClient, volID, nodeID0)
+		Expect(err).To(BeNil(), "Failed to attach and mount vol1")
+
+		err = controllerClient.ControllerPublishVolumeReadOnly(volID, nodeID1)
+		defer detachDisk(controllerClient, volID, nodeID1)
+		Expect(err).To(BeNil(), "Failed to attach and mount vol2")
+
+		// List Volumes
+		volsToNodes, err := controllerClient.ListVolumes()
+		Expect(err).To(BeNil(), "Failed ListVolumes")
+
+		// Verify List Volumes
+		Expect(volsToNodes[volID1]).To(BeNil(), "Unexpected real volume name")
+		Expect(volsToNodes[volID2]).To(BeNil(), "Unexpected real volume name")
+		Expect(volsToNodes[volID]).ToNot(BeNil(), "Couldn't find attached nodes for vol")
+		Expect(volsToNodes[volID]).To(ContainElements(nodeID0, nodeID1), "Couldn't find node in attached nodes for vol")
 	})
 
 	It("Should create a RePD instance, write to it, force-attach it to another instance, and read the same data", func() {
@@ -255,6 +261,24 @@ var _ = Describe("GCE PD CSI Driver Multi-Zone", func() {
 		Expect(strings.TrimSpace(string(readContents))).To(BeIdenticalTo(testFileContents), "content mismatch in zone 1")
 	})
 })
+
+func detachDisk(controllerClient *remote.CsiClient, volID string, nodeID string) {
+	// Detach Disk
+	err := controllerClient.ControllerUnpublishVolume(volID, nodeID)
+	if err != nil {
+		klog.Errorf("Failed to detach disk: %v", err)
+	}
+}
+
+func deleteDisk(controllerClient *remote.CsiClient, p, zone, volID, volName string) {
+	// Delete Disk
+	err := controllerClient.DeleteVolume(volID)
+	Expect(err).To(BeNil(), "DeleteVolume failed")
+
+	// Validate Disk Deleted
+	_, err = computeService.Disks.Get(p, zone, volName).Do()
+	Expect(gce.IsGCEError(err, "notFound")).To(BeTrue(), "Expected disk to not be found")
+}
 
 func testAttachWriteReadDetach(volID string, volName string, instance *remote.InstanceInfo, client *remote.CsiClient, readOnly bool) error {
 	var testFileContents = "test"

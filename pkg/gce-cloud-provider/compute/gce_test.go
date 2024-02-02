@@ -84,3 +84,46 @@ func TestIsGCEError(t *testing.T) {
 		}
 	}
 }
+
+func TestConstructComputeEndpoint(t *testing.T) {
+	testCases := []struct {
+		name            string
+		computeEndpoint string
+		variant         string
+		wantErr         bool
+		wantEndpoint    string
+	}{
+		{
+			name:            "Valid staging_alpha",
+			computeEndpoint: "https://www.googleapis.com/compute/staging_v1/",
+			variant:         "alpha",
+			wantEndpoint:    "https://www.googleapis.com/compute/staging_alpha/",
+		},
+		{
+			name:            "Regular v1",
+			computeEndpoint: "https://www.googleapis.com/compute/v1/",
+			variant:         "v1",
+			wantEndpoint:    "https://www.googleapis.com/compute/v1/",
+		},
+		{
+			name:            "Regular beta",
+			computeEndpoint: "https://www.googleapis.com/compute/v1/",
+			variant:         "beta",
+			wantEndpoint:    "https://www.googleapis.com/compute/beta/",
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Logf("Running test: %v", tc.name)
+		gotEndpoint, gotErr := constructComputeEndpoint(tc.computeEndpoint, tc.variant)
+		if gotErr == nil && tc.wantErr {
+			t.Fatalf("Expected err but didn't get err")
+		}
+		if gotErr != nil && !tc.wantErr {
+			t.Fatalf("Expected no err, but got %v", gotErr)
+		}
+		if gotEndpoint != tc.wantEndpoint {
+			t.Fatalf("constructComputeEndpoint(%v, %v) got %v, want %v", tc.computeEndpoint, tc.variant, gotEndpoint, tc.wantEndpoint)
+		}
+	}
+}

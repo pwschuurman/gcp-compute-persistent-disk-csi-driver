@@ -19,8 +19,10 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
 	"os"
 	"runtime"
+	"strings"
 	"time"
 
 	"golang.org/x/oauth2/google"
@@ -164,6 +166,24 @@ func readConfig(configPath string) (*ConfigFile, error) {
 	return cfg, nil
 }
 
+func constructComputeEndpoint(computeEndpoint string, variant string) (string, error) {
+	computeURL, err := url.Parse(computeEndpoint)
+	if err != nil {
+		return "", err
+	}
+	prefix := ""
+	pathParts := strings.Split(strings.Trim(computeURL.Path, "/"), "/")
+	if len(pathParts) != 2 && pathParts[0] != "compute" {
+		return "", fmt.Errorf("invalid compute endpoint path: %v", computeURL.Path)
+	}
+	if strings.Contains(computeEndpoint, "staging") {
+		prefix = "staging_"
+	}
+	computeURL.Path = "compute"
+	computeURL = computeURL.JoinPath(fmt.Sprintf("%s%s/", prefix, variant))
+	return computeURL.String(), nil
+}
+
 func createBetaCloudService(ctx context.Context, vendorVersion string, tokenSource oauth2.TokenSource, computeEndpoint string) (*computebeta.Service, error) {
 	client, err := newOauthClient(ctx, tokenSource)
 	if err != nil {
@@ -172,7 +192,10 @@ func createBetaCloudService(ctx context.Context, vendorVersion string, tokenSour
 
 	computeOpts := []option.ClientOption{option.WithHTTPClient(client)}
 	if computeEndpoint != "" {
-		betaEndpoint := fmt.Sprintf("%s/compute/beta/", computeEndpoint)
+		betaEndpoint, err := constructComputeEndpoint(computeEndpoint, "beta")
+		if err != nil {
+			return nil, err
+		}
 		computeOpts = append(computeOpts, option.WithEndpoint(betaEndpoint))
 	}
 	service, err := computebeta.NewService(ctx, computeOpts...)
@@ -191,7 +214,10 @@ func createAlphaCloudService(ctx context.Context, vendorVersion string, tokenSou
 
 	computeOpts := []option.ClientOption{option.WithHTTPClient(client)}
 	if computeEndpoint != "" {
-		alphaEndpoint := fmt.Sprintf("%s/compute/alpha/", computeEndpoint)
+		alphaEndpoint, err := constructComputeEndpoint(computeEndpoint, "alpha")
+		if err != nil {
+			return nil, err
+		}
 		computeOpts = append(computeOpts, option.WithEndpoint(alphaEndpoint))
 	}
 	service, err := computealpha.NewService(ctx, computeOpts...)
@@ -215,7 +241,10 @@ func createCloudServiceWithDefaultServiceAccount(ctx context.Context, vendorVers
 
 	computeOpts := []option.ClientOption{option.WithHTTPClient(client)}
 	if computeEndpoint != "" {
-		v1Endpoint := fmt.Sprintf("%s/compute/v1/", computeEndpoint)
+		v1Endpoint, err := constructComputeEndpoint(computeEndpoint, "v1")
+		if err != nil {
+			return nil, err
+		}
 		computeOpts = append(computeOpts, option.WithEndpoint(v1Endpoint))
 	}
 	service, err := compute.NewService(ctx, computeOpts...)

@@ -92,6 +92,10 @@ func (cloud *FakeCloudProvider) GetDefaultZone() string {
 	return cloud.zone
 }
 
+func (cloud *FakeCloudProvider) RepairUnderspecifiedVolumeKeyForZone(ctx context.Context, project string, volumeKey *meta.Key, instanceZone string) (string, *meta.Key, error) {
+	return cloud.RepairUnderspecifiedVolumeKey(ctx, project, volumeKey)
+}
+
 func (cloud *FakeCloudProvider) RepairUnderspecifiedVolumeKey(ctx context.Context, project string, volumeKey *meta.Key) (string, *meta.Key, error) {
 	if project == common.UnspecifiedValue {
 		project = cloud.project

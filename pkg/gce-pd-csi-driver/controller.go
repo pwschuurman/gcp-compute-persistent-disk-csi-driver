@@ -23,6 +23,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/GoogleCloudPlatform/k8s-cloud-provider/pkg/cloud/meta"
@@ -47,8 +48,9 @@ type GCEControllerServer struct {
 	CloudProvider gce.GCECompute
 	Metrics       metrics.MetricsManager
 
-	disks []*compute.Disk
-	seen  map[string]int
+	volumeEntriesMutex sync.Mutex
+	volumeEntries      []*csi.ListVolumesResponse_Entry
+	volumeEntriesSeen  map[string]int
 
 	snapshots      []*csi.ListSnapshotsResponse_Entry
 	snapshotTokens map[string]int
@@ -159,7 +161,7 @@ const (
 )
 
 var (
-	validResourceApiVersions = map[string]bool{"v1": true, "alpha": true, "beta": true}
+	validResourceApiVersions = map[string]bool{"v1": true, "alpha": true, "beta": true, "staging_v1": true, "staging_alpha": true, "staging_beta": true}
 )
 
 func isDiskReady(disk *gce.CloudDisk) (bool, error) {
@@ -603,12 +605,22 @@ func (gceCS *GCEControllerServer) executeControllerPublishVolume(ctx context.Con
 		PublishContext: nil,
 	}
 
-	project, volKey, err = gceCS.CloudProvider.RepairUnderspecifiedVolumeKey(ctx, project, volKey)
+	instanceZone, instanceName, err := common.NodeIDToZoneAndName(nodeID)
+	if err != nil {
+		return nil, status.Errorf(codes.NotFound, "could not split nodeID: %v", err.Error()), nil
+	}
+
+	project, volKey, err = gceCS.CloudProvider.RepairUnderspecifiedVolumeKeyForZone(ctx, project, volKey, instanceZone)
 	if err != nil {
 		if gce.IsGCENotFoundError(err) {
 			return nil, status.Errorf(codes.NotFound, "ControllerPublishVolume could not find volume with ID %v: %v", volumeID, err.Error()), nil
 		}
 		return nil, common.LoggedError("ControllerPublishVolume error repairing underspecified volume key: ", err), nil
+	}
+
+	// Only allow read-only attachment for "multi-zone" volumes
+	if volKey.Type() == meta.Zonal && volKey.Zone == common.MultiZoneValue && !readOnly {
+		return nil, status.Errorf(codes.InvalidArgument, "'multi-zone' volume %v only supports READ_ONLY: %v", volumeID, err.Error()), nil
 	}
 
 	// Acquires the lock for the volume on that node only, because we need to support the ability
@@ -624,10 +636,6 @@ func (gceCS *GCEControllerServer) executeControllerPublishVolume(ctx context.Con
 			return nil, status.Errorf(codes.NotFound, "Could not find disk %v: %v", volKey.String(), err.Error()), disk
 		}
 		return nil, common.LoggedError("Failed to getDisk: ", err), disk
-	}
-	instanceZone, instanceName, err := common.NodeIDToZoneAndName(nodeID)
-	if err != nil {
-		return nil, status.Errorf(codes.NotFound, "could not split nodeID: %v", err.Error()), disk
 	}
 	instance, err := gceCS.CloudProvider.GetInstanceOrError(ctx, instanceZone, instanceName)
 	if err != nil {
@@ -739,7 +747,13 @@ func (gceCS *GCEControllerServer) executeControllerUnpublishVolume(ctx context.C
 
 	volumeID := req.GetVolumeId()
 	nodeID := req.GetNodeId()
-	project, volKey, err = gceCS.CloudProvider.RepairUnderspecifiedVolumeKey(ctx, project, volKey)
+
+	instanceZone, instanceName, err := common.NodeIDToZoneAndName(nodeID)
+	if err != nil {
+		return nil, status.Errorf(codes.InvalidArgument, "could not split nodeID: %v", err.Error()), nil
+	}
+
+	project, volKey, err = gceCS.CloudProvider.RepairUnderspecifiedVolumeKeyForZone(ctx, project, volKey, instanceZone)
 	if err != nil {
 		if gce.IsGCENotFoundError(err) {
 			klog.Warningf("Treating volume %v as unpublished because it could not be found", volumeID)
@@ -756,10 +770,6 @@ func (gceCS *GCEControllerServer) executeControllerUnpublishVolume(ctx context.C
 	}
 	defer gceCS.volumeLocks.Release(lockingVolumeID)
 	diskToUnpublish, _ := gceCS.CloudProvider.GetDisk(ctx, project, volKey, gce.GCEAPIVersionV1)
-	instanceZone, instanceName, err := common.NodeIDToZoneAndName(nodeID)
-	if err != nil {
-		return nil, status.Errorf(codes.InvalidArgument, "could not split nodeID: %v", err.Error()), diskToUnpublish
-	}
 	instance, err := gceCS.CloudProvider.GetInstanceOrError(ctx, instanceZone, instanceName)
 	if err != nil {
 		if gce.IsGCENotFoundError(err) {
@@ -810,6 +820,7 @@ func (gceCS *GCEControllerServer) ValidateVolumeCapabilities(ctx context.Context
 	if err != nil {
 		return nil, status.Errorf(codes.InvalidArgument, "Volume ID is invalid: %v", err.Error())
 	}
+
 	project, volKey, err = gceCS.CloudProvider.RepairUnderspecifiedVolumeKey(ctx, project, volKey)
 	if err != nil {
 		if gce.IsGCENotFoundError(err) {
@@ -879,8 +890,9 @@ func (gceCS *GCEControllerServer) ListVolumes(ctx context.Context, req *csi.List
 			"ListVolumes got max entries request %v. GCE only supports values >0", req.MaxEntries)
 	}
 
-	offset := 0
+	offsetLow := 0
 	var ok bool
+	var volumeEntries []*csi.ListVolumesResponse_Entry
 	if req.StartingToken == "" {
 		diskList, _, err := gceCS.CloudProvider.ListDisks(ctx)
 		if err != nil {
@@ -889,10 +901,17 @@ func (gceCS *GCEControllerServer) ListVolumes(ctx context.Context, req *csi.List
 			}
 			return nil, common.LoggedError("Failed to list disk: ", err)
 		}
-		gceCS.disks = diskList
-		gceCS.seen = map[string]int{}
+		volumeEntries = disksToVolumeEntries(diskList)
+	}
+
+	gceCS.volumeEntriesMutex.Lock()
+	defer gceCS.volumeEntriesMutex.Unlock()
+
+	if req.StartingToken == "" {
+		gceCS.volumeEntries = volumeEntries
+		gceCS.volumeEntriesSeen = map[string]int{}
 	} else {
-		offset, ok = gceCS.seen[req.StartingToken]
+		offsetLow, ok = gceCS.volumeEntriesSeen[req.StartingToken]
 		if !ok {
 			return nil, status.Errorf(codes.Aborted, "ListVolumes error with invalid startingToken: %s", req.StartingToken)
 		}
@@ -903,9 +922,50 @@ func (gceCS *GCEControllerServer) ListVolumes(ctx context.Context, req *csi.List
 		maxEntries = maxListVolumesResponseEntries
 	}
 
+	nextToken := ""
+	offsetHigh := offsetLow + maxEntries
+	if offsetHigh < len(gceCS.volumeEntries) {
+		nextToken = string(uuid.NewUUID())
+		gceCS.volumeEntriesSeen[nextToken] = offsetHigh
+	} else {
+		offsetHigh = len(gceCS.volumeEntries)
+	}
+
+	return &csi.ListVolumesResponse{
+		Entries:   gceCS.volumeEntries[offsetLow:offsetHigh],
+		NextToken: nextToken,
+	}, nil
+}
+
+// isMultiZoneDisk returns the multi-zone volumeId of a disk if it is
+// "multi-zone", otherwise returns an empty string
+// The second parameter indiciates if it is a "multi-zone" disk
+func isMultiZoneDisk(diskRsrc string, diskLabels map[string]string) (string, bool) {
+	isMultiZoneDisk := false
+	for l := range diskLabels {
+		if l == common.MultiZoneLabel {
+			isMultiZoneDisk = true
+		}
+	}
+	if !isMultiZoneDisk {
+		return "", false
+	}
+
+	multiZoneVolumeId, err := common.VolumeIdAsMultiZone(diskRsrc)
+	if err != nil {
+		klog.Warningf("Error converting multi-zone volume handle for disk %s, skipped: %v", diskRsrc, err)
+		return "", false
+	}
+	return multiZoneVolumeId, true
+}
+
+// disksToVolumeEntries converts a list of disks to a list of CSI ListVolumeResponse entries
+// It appends "multi-zone" volumeHandles at the end. These are volumeHandles which
+// map to multiple volumeHandles in different zones
+func disksToVolumeEntries(disks []*compute.Disk) []*csi.ListVolumesResponse_Entry {
+	multiZoneNodesByVolumeId := map[string][]string{}
 	entries := []*csi.ListVolumesResponse_Entry{}
-	for i := 0; i+offset < len(gceCS.disks) && i < maxEntries; i++ {
-		d := gceCS.disks[i+offset]
+	for _, d := range disks {
 		diskRsrc, err := getResourceId(d.SelfLink)
 		if err != nil {
 			klog.Warningf("Bad ListVolumes disk resource %s, skipped: %v (%+v)", d.SelfLink, err, d)
@@ -920,6 +980,13 @@ func (gceCS *GCEControllerServer) ListVolumes(ctx context.Context, req *csi.List
 				users = append(users, rsrc)
 			}
 		}
+		if multiZoneVolumeId, isMultiZone := isMultiZoneDisk(diskRsrc, d.Labels); isMultiZone {
+			_, ok := multiZoneNodesByVolumeId[multiZoneVolumeId]
+			if !ok {
+				multiZoneNodesByVolumeId[multiZoneVolumeId] = []string{}
+			}
+			multiZoneNodesByVolumeId[multiZoneVolumeId] = append(multiZoneNodesByVolumeId[multiZoneVolumeId], users...)
+		}
 		entries = append(entries, &csi.ListVolumesResponse_Entry{
 			Volume: &csi.Volume{
 				VolumeId: diskRsrc,
@@ -929,17 +996,17 @@ func (gceCS *GCEControllerServer) ListVolumes(ctx context.Context, req *csi.List
 			},
 		})
 	}
-
-	nextToken := ""
-	if len(entries)+offset < len(gceCS.disks) {
-		nextToken = string(uuid.NewUUID())
-		gceCS.seen[nextToken] = len(entries) + offset
+	for volumeId, nodeIds := range multiZoneNodesByVolumeId {
+		entries = append(entries, &csi.ListVolumesResponse_Entry{
+			Volume: &csi.Volume{
+				VolumeId: volumeId,
+			},
+			Status: &csi.ListVolumesResponse_VolumeStatus{
+				PublishedNodeIds: nodeIds,
+			},
+		})
 	}
-
-	return &csi.ListVolumesResponse{
-		Entries:   entries,
-		NextToken: nextToken,
-	}, nil
+	return entries
 }
 
 func (gceCS *GCEControllerServer) GetCapacity(ctx context.Context, req *csi.GetCapacityRequest) (*csi.GetCapacityResponse, error) {
